@@ -56,7 +56,11 @@ ADMIN_BOOTSTRAP_TOKEN = _secrets["admin_bootstrap_token"]
 GLOBAL_DB_PATH = DATA_DIR / "global.db"
 TOOL_CALL_TIMEOUT_SECONDS = 30
 LOG_RETENTION_SECONDS = 3600  # 1 hour
-MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB per file
+# ---- 上传防爆限制（针对工具组包目录）----
+MAX_UPLOAD_BYTES = 30 * 1024 * 1024        # 单个文件最大 30 MB
+MAX_UPLOAD_FILES = 30                      # 单次上传的文件数必须「小于」此值（即最多 29 个）
+MAX_UPLOAD_DEPTH = 3                       # 目录最深 3 层
+MAX_TOTAL_UPLOAD_BYTES = 100 * 1024 * 1024  # 单次请求所有文件合计上限 100 MB（防超大 body）
 
 # Username used by the bootstrap admin account (created on startup).
 # Credentials are read from BASE_DIR/admin.json (copy admin.json.example),

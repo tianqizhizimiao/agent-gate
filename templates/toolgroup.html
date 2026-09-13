@@ -11,6 +11,7 @@
 <script src="/static/js/app.js"></script>
 <script>
 let ME = null, GROUPS = [], TG = null, ID = null, IS_OWNER = false, IS_ADMIN = false, CAN_MANAGE = false;
+let FILES = [];
 
 async function init() {
   if (!requireAuth()) return;
@@ -89,16 +90,22 @@ function render() {
     <div class="section">
       <div class="section-head"><h3>文件</h3></div>
       <div class="card flush">
-        ${CAN_MANAGE ? `<div class="row" style="padding:14px 16px;border-bottom:1px solid var(--border)">
-          <input type="file" id="file-input" style="padding:6px">
-          <button class="btn" onclick="uploadFile()">上传</button>
+        ${CAN_MANAGE ? `<div style="padding:14px 16px;border-bottom:1px solid var(--border)">
+          <div class="row" style="flex-wrap:wrap;gap:8px;align-items:center">
+            <input type="file" id="file-input" multiple style="padding:6px">
+            <button class="btn" onclick="uploadPicked('files')">上传文件</button>
+            <span class="muted">或</span>
+            <button class="btn ghost" onclick="document.getElementById('dir-input').click()">上传整个文件夹</button>
+            <input type="file" id="dir-input" webkitdirectory directory multiple style="display:none">
+          </div>
+          <div class="muted" id="upload-limit" style="font-size:12px;margin-top:8px"></div>
         </div>` : ""}
         <div class="scroll"><table>
           <thead><tr><th>名称</th><th>大小</th><th></th></tr></thead>
           <tbody id="files-body"></tbody>
         </table></div>
       </div>
-      <p class="muted" style="font-size:12px">该目录是一个 Python 包，上传的 <code>.py</code> 文件可在 <code>__init__.py</code> 中导入。</p>
+      <p class="muted" style="font-size:12px">该目录是一个 Python 包：<code>__init__.py</code> 里用 <code>@tool</code> 注册工具，其余模块可以 <code>import</code>。可以直接选文件夹整包上传，子目录会按原样还原（<code>__pycache__</code>、<code>.git</code> 等会自动跳过）。</p>
     </div>
 
     <!-- ============ 日志 ============ -->
@@ -132,7 +139,7 @@ function render() {
       </p>
     </div>`,
   });
-  loadInit(); loadTools(); loadFiles(); loadLogs(); loadMembers();
+  loadInit(); loadTools(); loadFiles(); loadLogs(); loadMembers(); loadLimits();
 }
 
 async function loadInit() {
@@ -185,37 +192,105 @@ async function loadFiles() {
   const tb = document.getElementById("files-body");
   let files = [];
   try { files = await API("/api/toolgroups/" + ID + "/files"); } catch (e) { return; }
+  FILES = files;
   if (!files.length) { tb.innerHTML = `<tr><td colspan="3" class="empty">暂无文件。</td></tr>`; return; }
-  tb.innerHTML = files.map(f => `<tr>
-    <td class="mono">${escapeHtml(f.name)}${f.is_dir ? "/" : ""}</td>
+  tb.innerHTML = files.map((f, i) => `<tr>
+    <td class="mono">${escapeHtml(f.name)}</td>
     <td class="muted">${f.is_dir ? "—" : fmtBytes(f.size)}</td>
     <td class="actions">${CAN_MANAGE && !f.is_dir
-      ? `<button class="btn danger sm" onclick="delFile('${escapeHtml(f.name)}')">删除</button>` : ""}</td>
+      ? `<button class="btn danger sm" onclick="delFileAt(${i})">删除</button>` : ""}</td>
   </tr>`).join("");
 }
 
-async function uploadFile() {
-  const input = document.getElementById("file-input");
-  if (!input.files.length) { toast("请先选择文件", "err"); return; }
+// ---------------------------------------------------------------- 上传
+// 限制从后端取，避免前后端各写一份常量后对不上
+let LIMITS = { max_files: 30, max_depth: 3, max_bytes: 30 * 1024 * 1024, max_total_bytes: 100 * 1024 * 1024 };
+
+async function loadLimits() {
+  try { LIMITS = await API("/api/toolgroups/" + ID + "/files/limits"); } catch (e) { return; }
+  const el = document.getElementById("upload-limit");
+  if (el) el.textContent =
+    `单次少于 ${LIMITS.max_files} 个文件 · 目录最深 ${LIMITS.max_depth} 层 · ` +
+    `单文件 ≤ ${fmtBytes(LIMITS.max_bytes)} · 合计 ≤ ${fmtBytes(LIMITS.max_total_bytes)}`;
+}
+
+const SKIP_DIRS = ["__pycache__", ".agentgate", ".git", ".idea", "node_modules", ".venv", "venv"];
+const SKIP_FILES = [".DS_Store", "Thumbs.db", "desktop.ini"];
+
+// 把浏览器给的文件列表整理成 [{file, path, size}]
+// stripTop=true 时用的是文件夹选择（webkitRelativePath = "文件夹/子目录/文件.py"），
+// 要去掉最外层那层文件夹名 —— 工具组目录本身就是根。
+function collectUploadFiles(fileList, stripTop) {
+  const items = [];
+  for (const f of fileList) {
+    let rel = stripTop ? (f.webkitRelativePath || f.name) : f.name;
+    rel = rel.replace(/\\/g, "/");
+    const parts = rel.split("/").filter(p => p && p !== ".");
+    if (stripTop) parts.shift();
+    if (!parts.length) continue;
+    if (parts.some(p => SKIP_DIRS.includes(p))) continue;
+    const base = parts[parts.length - 1];
+    if (SKIP_FILES.includes(base) || base.endsWith(".pyc")) continue;
+    items.push({ file: f, path: parts.join("/"), size: f.size });
+  }
+  return items;
+}
+
+// 前端先挡一道，给出具体是哪个文件超了；后端还有一份权威校验
+function checkUpload(items) {
+  if (!items.length) return "没有可上传的文件（可能都被过滤掉了）";
+  if (items.length >= LIMITS.max_files)
+    return `文件数 ${items.length} 过多：一次最多 ${LIMITS.max_files - 1} 个（需少于 ${LIMITS.max_files}）`;
+  let total = 0;
+  for (const it of items) {
+    const depth = it.path.split("/").length - 1;
+    if (depth > LIMITS.max_depth)
+      return `${it.path} 目录层级过深（${depth} 层）：最多 ${LIMITS.max_depth} 层`;
+    if (it.size > LIMITS.max_bytes)
+      return `${it.path} 太大（${fmtBytes(it.size)}）：单文件最多 ${fmtBytes(LIMITS.max_bytes)}`;
+    total += it.size;
+  }
+  if (total > LIMITS.max_total_bytes)
+    return `合计 ${fmtBytes(total)} 超限：单次最多 ${fmtBytes(LIMITS.max_total_bytes)}`;
+  return null;
+}
+
+async function uploadPicked(which) {
+  const input = document.getElementById(which === "dir" ? "dir-input" : "file-input");
+  const items = collectUploadFiles(input.files, which === "dir");
+  if (!items.length) { toast("没有可上传的文件（可能都被过滤掉了）", "err"); return; }
+  const err = checkUpload(items);
+  if (err) { toast(err, "err"); return; }
+
   const fd = new FormData();
-  fd.append("file", input.files[0]);
+  for (const it of items) fd.append("file", it.file, it.path);
+
   try {
     const r = await fetch("/api/toolgroups/" + ID + "/files", {
       method: "POST",
       headers: { Authorization: "Bearer " + localStorage.getItem("ag_token") },
       body: fd,
     });
-    if (!r.ok) { const j = await r.json(); throw new Error(j.detail || ("HTTP " + r.status)); }
+    if (!r.ok) {
+      let d = "HTTP " + r.status;
+      try { d = (await r.json()).detail || d; } catch (e2) {}
+      throw new Error(d);
+    }
+    const j = await r.json();
     input.value = "";
-    toast("上传成功");
+    toast(`已上传 ${j.count} 个文件`);
     loadFiles();
   } catch (e) { toast(e.message, "err"); }
 }
 
-async function delFile(name) {
-  if (!confirm("确定删除文件 " + name + "？")) return;
+async function delFileAt(i) {
+  const f = FILES[i];
+  if (!f) return;
+  if (!confirm("确定删除文件 " + f.name + "？")) return;
+  // 路径里的 / 要保留成分隔符，只编码每一段
+  const enc = f.name.split("/").map(encodeURIComponent).join("/");
   try {
-    await API("/api/toolgroups/" + ID + "/files/" + encodeURIComponent(name), { method: "DELETE" });
+    await API("/api/toolgroups/" + ID + "/files/" + enc, { method: "DELETE" });
     toast("已删除");
     loadFiles();
   } catch (e) { toast(e.message, "err"); }

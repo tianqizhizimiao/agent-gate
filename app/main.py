@@ -3,8 +3,9 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import auth, config, database
@@ -101,6 +102,27 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.mount("/static", StaticFiles(directory=str(config.STATIC_DIR)), name="static")
+
+    @app.middleware("http")
+    async def _guard_upload_size(request: Request, call_next):
+        """上传接口在解析 multipart **之前**先用 Content-Length 拦一道。
+
+        否则一个几百 MB 的 body 会被完整收下来（Starlette 会把超过 1 MB 的部分
+        落到临时文件），等到接口里的校验生效时磁盘已经被写过了。
+        """
+        if request.method == "POST" and request.url.path.endswith("/files"):
+            raw = request.headers.get("content-length")
+            if raw and raw.isdigit():
+                # multipart 的边界/头部本身也占字节，留 1 MB 余量，免得卡在上限的文件被误杀
+                if int(raw) > config.MAX_TOTAL_UPLOAD_BYTES + (1 << 20):
+                    return JSONResponse(
+                        status_code=413,
+                        content={
+                            "detail": "请求体过大：单次上传合计最多 "
+                            f"{config.MAX_TOTAL_UPLOAD_BYTES // 1048576} MB"
+                        },
+                    )
+        return await call_next(request)
 
     app.include_router(pages.router)
     app.include_router(auth_router.router)

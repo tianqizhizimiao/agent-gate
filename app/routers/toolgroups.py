@@ -286,35 +286,137 @@ def _safe_relpath(name: str) -> str | None:
     return "/".join(parts)
 
 
+def _size_of(f: UploadFile) -> int:
+    """取上传文件的字节数，不把内容读进内存。"""
+    if f.size is not None:
+        return f.size
+    pos = f.file.tell()
+    f.file.seek(0, 2)
+    size = f.file.tell()
+    f.file.seek(pos)
+    return size
+
+
+def _validate_uploads(entries: list[tuple[str, int]]) -> None:
+    """落盘前把整批文件校验一遍，任何一项不过就一个字节都不写。
+
+    规则（``config`` 里可调）：
+      * 文件数必须 **小于** ``MAX_UPLOAD_FILES``
+      * 目录层级不得超过 ``MAX_UPLOAD_DEPTH`` 层（``rel.count("/")``）
+      * 单个文件不得超过 ``MAX_UPLOAD_BYTES``
+      * 整批合计不得超过 ``MAX_TOTAL_UPLOAD_BYTES``
+      * 同名文件不允许（后一个会静默覆盖前一个，宁可报错）
+
+    ``entries`` 是 ``(相对路径, 字节数)``。
+    """
+    if not entries:
+        raise HTTPException(400, "没有收到任何文件")
+    if len(entries) >= config.MAX_UPLOAD_FILES:
+        raise HTTPException(
+            413,
+            f"文件数 {len(entries)} 过多：一次最多上传 {config.MAX_UPLOAD_FILES - 1} 个"
+            f"（必须小于 {config.MAX_UPLOAD_FILES}）",
+        )
+
+    seen: set[str] = set()
+    total = 0
+    for rel, size in entries:
+        if rel in seen:
+            raise HTTPException(400, f"文件重名：{rel}")
+        seen.add(rel)
+
+        depth = rel.count("/")
+        if depth > config.MAX_UPLOAD_DEPTH:
+            raise HTTPException(
+                413, f"{rel} 目录层级过深（{depth} 层）：最多 {config.MAX_UPLOAD_DEPTH} 层"
+            )
+        if size > config.MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                413,
+                f"{rel} 太大（{size / 1048576:.1f} MB）：单文件最多 "
+                f"{config.MAX_UPLOAD_BYTES // 1048576} MB",
+            )
+        total += size
+
+    if total > config.MAX_TOTAL_UPLOAD_BYTES:
+        raise HTTPException(
+            413,
+            f"合计 {total / 1048576:.1f} MB 超限：单次最多 "
+            f"{config.MAX_TOTAL_UPLOAD_BYTES // 1048576} MB",
+        )
+
+
 @router.get("/api/toolgroups/{gid}/files")
 def list_files(gid: str, user: dict = Depends(get_current_user)):
+    """列出包内所有文件，``name`` 是相对包根目录的路径（如 ``lib/util.py``）。
+
+    允许上传文件夹之后目录会嵌套，所以这里是递归的 —— 否则子目录里的文件在
+    页面上既看不见也删不掉。
+    """
     row, _owner, _member, _admin = _get_group_or_404(gid, user)
     pkg_dir = config.TOOLGROUPS_DIR / row["folder_name"]
-    out = []
-    if pkg_dir.exists():
-        for p in sorted(pkg_dir.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
-            if p.name in (".agentgate", "__pycache__"):
-                continue
-            out.append({"name": p.name, "size": 0 if p.is_dir() else p.stat().st_size, "is_dir": p.is_dir()})
+    out: list[dict] = []
+    if not pkg_dir.exists():
+        return out
+    for p in sorted(pkg_dir.rglob("*")):
+        rel = p.relative_to(pkg_dir)
+        if any(part in (".agentgate", "__pycache__") for part in rel.parts):
+            continue
+        if p.is_dir():
+            continue
+        out.append({"name": rel.as_posix(), "size": p.stat().st_size, "is_dir": False})
     return out
 
 
 @router.post("/api/toolgroups/{gid}/files")
-async def upload_file(gid: str, user: dict = Depends(get_current_user), file: UploadFile = File(...)):
+async def upload_file(
+    gid: str,
+    user: dict = Depends(get_current_user),
+    file: list[UploadFile] = File(...),
+):
+    """上传一个或多个文件（``file`` 字段可重复），目录结构由文件名里的 ``/`` 决定。
+
+    前端用 ``webkitdirectory`` 选文件夹时，浏览器会把
+    ``文件夹名/子目录/文件.py`` 放进 ``filename``；前端负责剥掉最外层那层
+    （工具组目录本身就是根），后端只做校验和落盘。
+
+    限制见 ``_validate_uploads``。
+    """
     row, is_owner, _member, is_admin = _get_group_or_404(gid, user)
     _need_write(is_owner, is_admin, "upload files")
-    rel = _safe_relpath(file.filename or "upload.bin")
-    if rel is None:
-        raise HTTPException(400, "Invalid file name")
+
+    # 1) 整批先校验：任何一项不合法就一个字节都不写，避免留下残缺文件
+    staged: list[tuple[str, UploadFile]] = []
+    for f in file:
+        rel = _safe_relpath(f.filename or "")
+        if rel is None:
+            raise HTTPException(400, f"非法文件名：{f.filename!r}")
+        staged.append((rel, f))
+    _validate_uploads([(rel, _size_of(f)) for rel, f in staged])
+
+    # 2) 全部通过后才落盘
     pkg_dir = config.TOOLGROUPS_DIR / row["folder_name"]
-    target = pkg_dir / rel
-    target.parent.mkdir(parents=True, exist_ok=True)
-    contents = await file.read()
-    if len(contents) > config.MAX_UPLOAD_BYTES:
-        raise HTTPException(413, "File too large")
-    target.write_bytes(contents)
+    written: list[str] = []
+    for rel, f in staged:
+        target = pkg_dir / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(await f.read())
+        written.append(rel)
+
     manager.invalidate(gid)
-    return {"ok": True, "name": rel}
+    return {"ok": True, "count": len(written), "files": written}
+
+
+@router.get("/api/toolgroups/{gid}/files/limits")
+def upload_limits(gid: str, user: dict = Depends(get_current_user)):
+    """把上传限制告诉前端，避免前后端各写一份常量后对不上。"""
+    _get_group_or_404(gid, user)
+    return {
+        "max_files": config.MAX_UPLOAD_FILES,
+        "max_depth": config.MAX_UPLOAD_DEPTH,
+        "max_bytes": config.MAX_UPLOAD_BYTES,
+        "max_total_bytes": config.MAX_TOTAL_UPLOAD_BYTES,
+    }
 
 
 @router.delete("/api/toolgroups/{gid}/files/{name:path}")
