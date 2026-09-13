@@ -149,6 +149,10 @@ SiliconFlow、Ollama、vLLM、LM Studio、one-api/new-api 与 OpenRouter 都讲�
 
 ## 编写工具组
 
+> 📘 **完整开发指南见 [PLUGINS.md](PLUGINS.md)** —— 插件有什么用、内部怎么工作
+> （注入 / 拦截 / 多轮循环 / 并发与超时）、API 详解、类型注解对照表、完整示例、
+> 常见坑速查。下面只是速览。
+
 工具组的目录就是一个 Python 包。它的 `__init__.py` 在加载时执行，并带有以下**注入的全局名字**
 （无需 import）：
 
