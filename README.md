@@ -224,10 +224,13 @@ def get_weather(city: str) -> str:
 
 ### 上传：可以整个文件夹一起传
 
-界面上是一块虚线框，**点整个框就能选文件**（原生 `<input type="file">` 太丑，藏起来了）。
-**上传整个文件夹** 用的是浏览器的 `webkitdirectory`，会保留子目录结构（选中的那一层
-文件夹名会被剥掉 —— 工具组目录本身就是根）。`__pycache__`、`.git`、`.venv`、
-`.DS_Store` 等会被自动跳过。
+界面上是**一个按钮 + 下拉**：`选择文件 / 文件夹 ▾`，点开有两个选项 —— 选文件（可多选）
+或选整个文件夹（保留子目录，选中的那层文件夹名会被剥掉，因为工具组目录本身就是根）。
+`__pycache__`、`.git`、`.venv`、`.DS_Store` 等会被自动跳过。
+
+> 为什么是下拉而不是一个选择器？因为**浏览器不允许**：原生 `<input type="file">` 一旦
+> 加上 `webkitdirectory` 就只能选文件夹，不加就只能选文件 —— 没有"一个对话框两种都收"
+> 这回事。所以做成一个入口、两个选项。
 
 **防爆限制**（都在 `app/config.py`，改完重启生效）：
 
@@ -300,6 +303,7 @@ app/
 templates/  static/    UI
 tools/      check_routes.py    前/后端路径一致性检查
             check_encoding.py  源码乱码/编码检查
+            check_template.py  模板里 onclick 指向的函数、getElementById 的 id 是否存在
 data/       toolgroups/<folder>/   运行期状态 + 包（运行后生成）
 ```
 
@@ -308,11 +312,20 @@ data/       toolgroups/<folder>/   运行期状态 + 包（运行后生成）
 ```bash
 python tools/check_routes.py     # 前端 API(...) 调用的路径是否都有后端路由（方法+形状比对）
 python tools/check_encoding.py   # 所有源码是否被按错误编码读写（私用区字符 / U+FFFD / 乱码汉字）
+python tools/check_template.py   # 模板里 onXxx 引用的函数、getElementById 的 id 是否都存在
 ```
 
-> ⚠️ 在本机用 PowerShell 改这些文件时**务必指定 UTF-8**。Windows PowerShell 5.1 的
-> `Get-Content -Raw` 默认按 ANSI(GBK) 解码，再配合 `Set-Content`/`WriteAllText` 写回
-> 会把中文**不可逆**地写成乱码。用编辑器改，或显式 `-Encoding utf8`。
+> ⚠️ **不要用 PowerShell 读写这些文件。** Windows PowerShell 5.1 的 `Get-Content -Raw`
+> 默认按 ANSI(GBK) 解码，再配合 `Set-Content`/`WriteAllText` 写回会把中文**不可逆地**
+> 写成乱码 —— `check_encoding.py` 能查出来，但**修不回来**（GBK 的私用区映射无法反查）。
+> 要改文件用编辑器，或用 Python：
+>
+> ```bash
+> python -c "import pathlib; p=pathlib.Path('x.html'); p.write_text(p.read_text(encoding='utf-8').replace('a','b'), encoding='utf-8')"
+> ```
+>
+> 如果不慎弄坏且**尚未提交**，`git checkout -- <文件>` 回退后重做编辑是最省事的路
+> （别试图反向解码还原，.NET 的 GBK 与 Python 的编解码器在私用区上并不对称）。
 
 ## 注意事项与安全
 

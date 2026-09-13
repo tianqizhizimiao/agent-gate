@@ -91,12 +91,14 @@ function render() {
       <div class="section-head"><h3>文件</h3></div>
       <div class="card flush">
         ${CAN_MANAGE ? `<div style="padding:14px 16px;border-bottom:1px solid var(--border)">
-          <div class="upload-zone" id="upload-zone" title="点击选择文件">
-            <div class="uz-main">点击选择文件<span class="muted">（可多选）</span></div>
-            <div class="uz-sub">整个文件夹请用下方按钮</div>
-          </div>
-          <div class="row" style="gap:8px;margin-top:10px;align-items:center">
-            <button class="btn ghost sm" onclick="pickDir()">上传整个文件夹</button>
+          <div class="row" style="gap:10px;align-items:center">
+            <div class="picker">
+              <button class="btn sm" onclick="togglePicker(event)">选择文件 / 文件夹 ▾</button>
+              <div class="picker-menu" id="picker-menu" style="display:none">
+                <button onclick="pickFiles()">选择文件 <span class="muted">可多选</span></button>
+                <button onclick="pickDir()">选择整个文件夹 <span class="muted">保留子目录</span></button>
+              </div>
+            </div>
             <span class="muted" id="upload-limit" style="font-size:12px"></span>
           </div>
           <input type="file" id="file-input" multiple style="display:none">
@@ -323,21 +325,41 @@ function checkUpload(items) {
   return null;
 }
 
-// 上传区的接线：点整个框 = 选文件（原生 input 藏起来了，它太丑）
+// 上传入口：一个按钮 + 下拉。
+// 浏览器限制：原生选择器没法同时接受「文件」和「文件夹」—— webkitdirectory 一加上
+// 就只能是文件夹。所以做成一个按钮点开两个选项，至少入口是统一的。
+function togglePicker(e) {
+  if (e) { e.stopPropagation(); }
+  const m = document.getElementById("picker-menu");
+  if (!m) return;
+  m.style.display = (m.style.display === "none" || !m.style.display) ? "flex" : "none";
+}
+
+function closePicker() {
+  const m = document.getElementById("picker-menu");
+  if (m) m.style.display = "none";
+}
+
+function pickFiles() {
+  closePicker();
+  const el = document.getElementById("file-input");
+  if (el) el.click();
+}
+
 function pickDir() {
+  closePicker();
   const el = document.getElementById("dir-input");
   if (el) el.click();
 }
 
 function initUploadZone() {
-  const zone = document.getElementById("upload-zone");
   const input = document.getElementById("file-input");
   const dirInput = document.getElementById("dir-input");
-  if (!zone || !input) return;
-
-  zone.addEventListener("click", () => input.click());
+  if (!input) return;
   input.addEventListener("change", () => { if (input.files.length) uploadPicked("files"); });
   if (dirInput) dirInput.addEventListener("change", () => { if (dirInput.files.length) uploadPicked("dir"); });
+  // 点别处收起菜单
+  document.addEventListener("click", () => closePicker());
 }
 
 async function uploadPicked(which) {
