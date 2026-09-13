@@ -78,7 +78,7 @@ from:
 3. a random one-time token in `data/secret.json` (printed to the console on
    first run)
 
-A default `admin.json` (`admin` / `change-me`) ships with the repo — **change
+A default `admin.json` (`admin` / `admin`) is tracked in the repo — **change
 it** before exposing the server. Log in as admin → **Admin** → generate a
 registration token → hand it to a new user.
 
@@ -276,7 +276,9 @@ python tools/check_encoding.py   # 所有源码是否被按错误编码读写（
   A plaintext `password` field is still accepted as an explicit, opt-in fallback.
 - **The admin password lives in plaintext in `admin.json`** (by design — it is
   the bootstrap source of truth). At startup it is hashed into the DB, so the
-  database itself never holds it. Keep `admin.json` out of version control.
+  database itself never holds it. `admin.json` **is tracked in version control**,
+  so its default (`admin` / `admin`) is public — change it before exposing the
+  server, or override it with `AGENTGATE_ADMIN_USER` / `AGENTGATE_ADMIN_PASS`.
 - **`admin.json` defines the bootstrap admin.** At every start
   `bootstrap_admin()` enforces:
   - the account named by `admin.json`'s `username` always exists, is
