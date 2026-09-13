@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentGate — 仪表盘</title>
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<div id="root"></div>
+<script src="/static/js/app.js"></script>
+<script>
+let ME = null, UPS = [], KEYS = [], TGS = [];
+
+function allModelNames() {
+  const seen = new Set();
+  UPS.forEach(u => (u.models || []).forEach(m => seen.add(m)));
+  return Array.from(seen);
+}
+
+async function init() {
+  if (!requireAuth()) return;
+  ME = await loadMe();
+  if (!ME) return;
+  const groups = await loadGroups(true);
+  await Promise.all([loadUpstreams(), loadKeys(), loadToolGroups()]);
+  render(groups);
+}
+
+function render(groups) {
+  const modelCount = allModelNames().length;
+  mount(ME, groups, {
+    active: "dashboard",
+    title: "仪表盘",
+    actions: `<button class="btn ghost sm" onclick="init()">刷新</button>`,
+    body: `
+    <div class="page-head">
+      <h2>仪表盘</h2>
+      <p>配置上游 API（渠道），创建下游密钥，查看 Token 用量与工具组。</p>
+    </div>
+
+    <!-- ============ 上游 API ============ -->
+    <div class="section">
+      <div class="section-head">
+        <h3>上游 API</h3>
+        <span class="spacer"></span>
+        <span class="hint">共 ${UPS.length} 个 · 开放模型 ${modelCount} 个</span>
+        <button class="btn sm" onclick="openUpstreamForm(null)"><span style="display:inline-flex">${ICON.plus}</span>添加上游</button>
+      </div>
+      <div class="card flush">
+        <div class="scroll"><table>
+          <thead><tr><th>名称</th><th>上游地址</th><th>密钥</th><th>协议</th><th>开放模型</th><th></th></tr></thead>
+          <tbody id="ups-body"></tbody>
+        </table></div>
+      </div>
+      <p class="muted" style="font-size:12px">
+        可以添加多个上游。每个上游勾选的模型会**合并**起来，通过 <code>GET /v1/models</code> 全部开放给下游选择；
+        下游请求里的 <code>model</code> 会自动路由到声明了该模型的上游。
+      </p>
+    </div>
+
+    <!-- ============ API 密钥 ============ -->
+    <div class="section">
+      <div class="section-head"><h3>API 密钥</h3><span class="spacer"></span>
+        <span class="hint">共 ${KEYS.length} 个</span></div>
+      <div class="card">
+        <div class="row" style="margin-bottom:10px">
+          <div class="field col grow"><label>备注名称</label><input id="k-label" placeholder="例如：给客户A"></div>
+          <div class="field col grow"><label>自定义密钥（可选）</label>
+            <input id="k-custom" class="code" placeholder="留空 = 随机长串"></div>
+          <button class="btn" onclick="createKey()">创建密钥</button>
+        </div>
+        <p class="muted" style="font-size:12px;margin:0 0 14px">
+          留空生成 <code>sk-</code> + 48 位随机字符；填写则生成 <code>sk-你填的内容-4位随机</code>
+          （只能含字母、数字、点、下划线、短横线，长度 2–40）。密钥随时可在下方复制。
+        </p>
+        <div class="scroll scroll-b"><table>
+          <thead><tr><th>密钥（可复制）</th><th>备注</th><th>可用模型</th><th>绑定工具组</th><th>创建时间</th><th></th></tr></thead>
+          <tbody id="keys-body"></tbody>
+        </table></div>
+        <p class="muted" style="font-size:12px;margin:12px 0 0">
+          在客户端以 <code>Authorization: Bearer sk-...</code> 调用 <code>POST /v1/chat/completions</code>；把密钥绑定到工具组即可启用提示词注入与工具拦截。
+        </p>
+      </div>
+    </div>
+
+    <!-- ============ Token 用量 ============ -->
+    <div class="section">
+      <div class="section-head"><h3>Token 用量</h3></div>
+      <div class="card">
+        <div class="kv" id="usage-summary"></div>
+        <hr>
+        <div class="section-head" style="margin:0 0 8px"><h3 style="font-size:13px;color:var(--muted)">按模型统计</h3></div>
+        <table><thead><tr><th>模型</th><th>请求数</th><th>总 Token</th></tr></thead><tbody id="usage-models"></tbody></table>
+        <hr>
+        <div class="section-head" style="margin:0 0 8px"><h3 style="font-size:13px;color:var(--muted)">最近请求</h3></div>
+        <div class="scroll scroll-b"><table>
+          <thead><tr><th>时间</th><th>模型</th><th>输入</th><th>输出</th><th>合计</th><th>状态</th><th>工具组</th></tr></thead>
+          <tbody id="usage-recent"></tbody>
+        </table></div>
+      </div>
+    </div>
+
+    <!-- ============ 工具组 ============ -->
+    <div class="section">
+      <div class="section-head"><h3>工具组</h3><span class="spacer"></span>
+        <span class="hint">共 ${TGS.length} 个</span></div>
+      <div class="card">
+        <div class="row" style="margin-bottom:14px">
+          <div class="field col grow"><label>新建工具组名称</label><input id="tg-name" placeholder="my-tools"></div>
+          <button class="btn" onclick="createTG()">创建</button>
+          <div style="flex:1"></div>
+          <div class="field col grow"><label>通过工具组 ID 加入</label><input id="tg-join" class="code" placeholder="粘贴工具组 ID"></div>
+          <button class="btn ghost" onclick="joinTG()">加入</button>
+        </div>
+        <div class="scroll scroll-b"><table>
+          <thead><tr><th>名称</th><th>工具组 ID（分享以邀请）</th><th>我的角色</th><th>创建时间</th><th></th></tr></thead>
+          <tbody id="tgs-body"></tbody>
+        </table></div>
+      </div>
+    </div>`,
+  });
+  renderUpstreams();
+  renderKeys();
+  renderUsage();
+  renderTGs();
+}
+
+// ============================================================================
+// 上游 API
+// ============================================================================
+let _upForm = { uid: null, fields: { name: "", base_url: "", api_key: "", key_hint: "" },
+                models: [], selected: [], defaultModel: "",
+                protocol: "", protocolLabel: "", error: null, loading: false };
+
+async function loadUpstreams() { UPS = await API("/api/upstreams"); }
+
+function renderUpstreams() {
+  const tb = document.getElementById("ups-body");
+  if (!UPS.length) {
+    tb.innerHTML = `<tr><td colspan="5" class="empty">还没有上游，点右上角「添加上游」开始配置。</td></tr>`;
+    return;
+  }
+  tb.innerHTML = UPS.map(u => `<tr>
+    <td>${escapeHtml(u.name) || '<span class="muted">未命名</span>'}</td>
+    <td class="mono">${escapeHtml(u.base_url)}</td>
+    <td class="mono-sm">${escapeHtml(u.api_key_hint) || '<span class="muted">—</span>'}</td>
+    <td>${u.protocol
+        ? `<span class="badge ok">${escapeHtml(u.protocol_label || u.protocol)}</span>`
+        : '<span class="badge muted">未探测</span>'}</td>
+    <td>${(u.models || []).length
+        ? `<span class="badge ok">${u.models.length} 个</span>`
+        : '<span class="badge warn">未选择</span>'}</td>
+    <td class="actions">
+      <button class="btn ghost sm" onclick="openUpstreamForm('${u.id}')">配置模型</button>
+      <button class="btn danger sm" onclick="deleteUpstream('${u.id}')">删除</button>
+    </td>
+  </tr>`).join("");
+}
+
+function openUpstreamForm(uid) {
+  const u = uid ? UPS.find(x => x.id === uid) : null;
+  _upForm = {
+    uid: uid || null,
+    fields: { name: u ? u.name : "", base_url: u ? u.base_url : "", api_key: "", key_hint: u ? u.api_key_hint : "" },
+    models: u ? (u.models || []).slice() : [],
+    selected: u ? (u.models || []).slice() : [],
+    defaultModel: u ? (u.default_model || "") : "",
+    protocol: u ? (u.protocol || "") : "",
+    protocolLabel: u ? (u.protocol_label || "") : "",
+    error: null,
+    loading: false,
+  };
+  showModal(uid ? "配置上游" : "添加上游", "");
+  renderUpstreamForm();
+  if (uid) fetchUpstreamModels(uid);
+}
+
+function captureUpForm() {
+  const g = id => { const el = document.getElementById(id); return el ? el.value : undefined; };
+  const n = g("up-name"), b = g("up-url"), k = g("up-key"), p = g("up-proto");
+  if (n !== undefined) _upForm.fields.name = n;
+  if (b !== undefined) _upForm.fields.base_url = b;
+  if (k !== undefined) _upForm.fields.api_key = k;
+  if (p !== undefined) _upForm.protocol = p;
+  _upForm.selected = Array.from(document.querySelectorAll(".modal-body input[type=checkbox][data-model]:checked"))
+    .map(cb => cb.dataset.model);
+}
+
+function renderUpstreamForm() {
+  const f = _upForm;
+  const sel = new Set(f.selected);
+  const isEdit = !!f.uid;
+
+  let html = `
+    <div class="field col" style="margin-bottom:10px"><label>名称</label>
+      <input id="up-name" value="${escapeHtml(f.fields.name)}" placeholder="例如 DeepSeek"></div>
+    <div class="field col" style="margin-bottom:10px"><label>上游地址</label>
+      <input id="up-url" class="code" value="${escapeHtml(f.fields.base_url)}" placeholder="https://api.deepseek.com/v1"></div>
+    <div class="field col" style="margin-bottom:10px">
+      <label>上游密钥${isEdit ? "（留空表示不修改）" : ""}</label>
+      <input id="up-key" class="code" value="${escapeHtml(f.fields.api_key)}" placeholder="${isEdit && f.fields.key_hint ? "当前：" + escapeHtml(f.fields.key_hint) : "sk-..."}"></div>
+    <div class="field col" style="margin-bottom:10px">
+      <label>协议${f.protocol ? "" : "（探测不出时可手动指定）"}</label>
+      <select id="up-proto">
+        <option value="openai" ${f.protocol === "openai" || !f.protocol ? "selected" : ""}>OpenAI 兼容（DeepSeek / 通义千问兼容模式 / Moonshot / GLM / Ollama / vLLM …）</option>
+        <option value="anthropic" ${f.protocol === "anthropic" ? "selected" : ""}>Anthropic Messages（Claude）</option>
+        <option value="gemini" ${f.protocol === "gemini" ? "selected" : ""}>Google Gemini</option>
+        <option value="dashscope" ${f.protocol === "dashscope" ? "selected" : ""}>阿里 DashScope 原生（通义千问）</option>
+      </select></div>
+    <div class="row" style="gap:8px;align-items:center">
+      <button class="btn ghost sm" onclick="fetchProbeModels()" ${f.loading ? "disabled" : ""}>
+        ${f.loading ? "获取中…" : "获取模型列表"}</button>
+    </div>`;
+
+  if (f.protocol || f.protocolLabel) {
+    html += `<p class="field-note" style="margin-top:10px">
+      <span class="badge ok">协议：${escapeHtml(f.protocolLabel || f.protocol)}</span>
+    </p>`;
+  } else if (!f.loading && f.models.length) {
+    html += `<p class="field-note" style="margin-top:10px">
+      <span class="badge muted">协议未探测</span>
+      <span class="muted" style="margin-left:6px">可在上方手动选择</span></p>`;
+  }
+
+  if (f.error) {
+    html += `<p class="field-note" style="color:var(--danger);margin-top:10px">
+      <span class="badge err">获取失败</span> ${escapeHtml(f.error)}</p>`;
+  }
+
+  html += `<hr><p class="field-note">勾选要对该账户下游开放的模型；多个上游的模型会合并。</p>`;
+
+  if (f.models.length) {
+    html += `<div class="model-list">` + f.models.map(m => `
+      <div class="model-row">
+        <label style="display:flex;align-items:center;gap:10px;flex:1;cursor:pointer">
+          <input type="checkbox" data-model="${escapeHtml(m)}" ${sel.has(m) ? "checked" : ""} onchange="updateUpCount()">
+          <span class="mname">${escapeHtml(m)}</span>
+        </label>
+        ${f.defaultModel === m
+          ? '<span class="badge ok">默认</span>'
+          : `<button class="btn ghost sm" onclick="setUpDefault('${escapeHtml(m)}')">设为默认</button>`}
+      </div>`).join("") + `</div>`;
+  } else {
+    html += `<p class="muted" style="margin:0 0 10px">还没有模型，点「获取模型列表」或手动添加。</p>`;
+  }
+
+  html += `
+    <div class="row" style="margin-top:12px;gap:8px">
+      <input id="up-manual" class="code grow" placeholder="手动添加模型名，例如 gpt-4o-mini"
+             onkeydown="if(event.key==='Enter'){event.preventDefault();addUpManual();}">
+      <button class="btn ghost sm" onclick="addUpManual()">添加</button>
+    </div>
+    <div class="row" style="margin-top:18px;gap:8px;align-items:center">
+      <span class="muted" style="font-size:12.5px;margin-right:auto">已选 <b id="up-count">${sel.size}</b> 个</span>
+      <button class="btn ghost" onclick="closeModal()">取消</button>
+      <button class="btn" onclick="saveUpstream()">保存</button>
+    </div>`;
+
+  const body = document.querySelector(".modal-body");
+  if (body) body.innerHTML = html;
+}
+
+function updateUpCount() {
+  const n = document.querySelectorAll(".modal-body input[type=checkbox][data-model]:checked").length;
+  const el = document.getElementById("up-count");
+  if (el) el.textContent = n;
+}
+
+function mutSet(list, v, on) {
+  const s = new Set(list);
+  if (on) s.add(v); else s.delete(v);
+  return Array.from(s);
+}
+
+async function fetchUpstreamModels(uid) {
+  captureUpForm();                 // 先保住用户已输入的内容再重绘
+  _upForm.loading = true;
+  renderUpstreamForm();
+  try {
+    const r = await API("/api/upstreams/" + uid + "/models");
+    _upForm.models = r.models || [];
+    _upForm.selected = r.selected || [];
+    _upForm.defaultModel = r.default_model || "";
+    _upForm.protocol = r.protocol || "";
+    _upForm.protocolLabel = r.protocol_label || "";
+    _upForm.error = r.error || null;
+  } catch (e) {
+    _upForm.error = e.message;
+  }
+  _upForm.loading = false;
+  renderUpstreamForm();
+}
+
+async function fetchProbeModels() {
+  captureUpForm();
+  if (!_upForm.fields.base_url.trim()) { toast("请先填写上游地址", "err"); return; }
+  _upForm.loading = true;
+  _upForm.error = null;
+  renderUpstreamForm();
+  try {
+    const r = await API("/api/upstreams/probe-models", { method: "POST", body: JSON.stringify({
+      base_url: _upForm.fields.base_url,
+      api_key: _upForm.fields.api_key,
+    }) });
+    const merged = new Set(_upForm.models);
+    (r.models || []).forEach(m => merged.add(m));
+    _upForm.models = Array.from(merged);
+    _upForm.protocol = r.protocol || "";
+    _upForm.protocolLabel = r.protocol_label || "";
+    _upForm.error = r.error || null;
+  } catch (e) {
+    _upForm.error = e.message;
+  }
+  _upForm.loading = false;
+  renderUpstreamForm();
+}
+
+function addUpManual() {
+  const inp = document.getElementById("up-manual");
+  const v = (inp.value || "").trim();
+  if (!v) { inp.focus(); return; }
+  captureUpForm();
+  if (!_upForm.models.includes(v)) _upForm.models.push(v);
+  if (!_upForm.selected.includes(v)) _upForm.selected.push(v);
+  renderUpstreamForm();
+  const again = document.getElementById("up-manual");
+  if (again) again.focus();
+}
+
+function setUpDefault(m) {
+  captureUpForm();
+  _upForm.defaultModel = m;
+  if (!_upForm.selected.includes(m)) _upForm.selected.push(m);
+  renderUpstreamForm();
+}
+
+async function saveUpstream() {
+  captureUpForm();
+  const f = _upForm;
+  if (!f.fields.base_url.trim()) { toast("请填写上游地址", "err"); return; }
+  const models = f.selected.slice();
+  let def = f.defaultModel;
+  if (!def || !models.includes(def)) def = models[0] || "";
+  try {
+    if (f.uid) {
+      const payload = {
+        name: f.fields.name, base_url: f.fields.base_url,
+        protocol: f.protocol || "", models: models, default_model: def,
+      };
+      if (f.fields.api_key) payload.api_key = f.fields.api_key;
+      await API("/api/upstreams/" + f.uid, { method: "PUT", body: JSON.stringify(payload) });
+    } else {
+      await API("/api/upstreams", { method: "POST", body: JSON.stringify({
+        name: f.fields.name, base_url: f.fields.base_url, api_key: f.fields.api_key,
+        protocol: f.protocol || "", models: models, default_model: def,
+      }) });
+    }
+    toast("上游已保存");
+    closeModal();
+    await init();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function deleteUpstream(uid) {
+  const u = UPS.find(x => x.id === uid);
+  if (!confirm(`确定删除上游「${(u && u.name) || uid}」？`)) return;
+  try {
+    await API("/api/upstreams/" + uid, { method: "DELETE" });
+    toast("上游已删除");
+    await init();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+// ============================================================================
+// API 密钥
+// ============================================================================
+function renderKeys() {
+  const tb = document.getElementById("keys-body");
+  if (!KEYS.length) { tb.innerHTML = `<tr><td colspan="6" class="empty">还没有 API 密钥。</td></tr>`; return; }
+  const modelCount = allModelNames().length;
+  tb.innerHTML = KEYS.map(k => {
+    const tgOpts = ['<option value="">— 未绑定（直连上游）—</option>'].concat(
+      TGS.map(t => `<option value="${t.id}" ${t.id === k.tool_group_id ? "selected" : ""}>${escapeHtml(t.name)}</option>`)
+    ).join("");
+    const keyCell = k.key
+      ? `<span class="mono" style="display:inline-block;max-width:240px;overflow:hidden;text-overflow:ellipsis;
+              white-space:nowrap;vertical-align:middle" title="${escapeHtml(k.key)}">${escapeHtml(k.key)}</span>
+         <button class="btn ghost sm" style="margin-left:6px" data-k="${escapeHtml(k.key)}"
+                 onclick="copyText(this.dataset.k)">复制</button>`
+      : `<span class="mono-sm">${escapeHtml(k.key_prefix)}…</span>
+         <span class="badge warn" style="margin-left:6px">旧密钥不可复制</span>`;
+    return `<tr>
+      <td>${keyCell}</td>
+      <td>${escapeHtml(k.label) || '<span class="muted">—</span>'}</td>
+      <td>${modelCount
+        ? `<span class="badge ok">全部 ${modelCount} 个</span>`
+        : '<span class="badge warn">未配置上游</span>'}</td>
+      <td><select onchange="bindTG('${k.id}', this.value)">${tgOpts}</select></td>
+      <td class="muted">${fmtTime(k.created_at)}</td>
+      <td class="actions"><button class="btn danger sm" onclick="delKey('${k.id}')">删除</button></td>
+    </tr>`;
+  }).join("");
+}
+
+async function createKey() {
+  try {
+    const r = await API("/api/apikeys", { method: "POST", body: JSON.stringify({
+      label: document.getElementById("k-label").value,
+      custom_key: document.getElementById("k-custom").value,
+    }) });
+    prompt("新的 API 密钥（之后也可在列表中随时复制）：", r.full_key);
+    document.getElementById("k-custom").value = "";
+    document.getElementById("k-label").value = "";
+    await loadKeys(); renderKeys();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function delKey(id) {
+  if (!confirm("确定删除该 API 密钥？删除后使用它的客户端将立即失效。")) return;
+  try {
+    await API("/api/apikeys/" + id, { method: "DELETE" });
+    toast("已删除");
+    await loadKeys(); renderKeys();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function bindTG(kid, tgId) {
+  try {
+    await API("/api/apikeys/" + kid + "/toolgroup", { method: "PUT", body: JSON.stringify({ tool_group_id: tgId || null }) });
+    toast(tgId ? "已绑定工具组" : "已解除绑定");
+    await loadKeys(); renderKeys();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function loadKeys() { KEYS = await API("/api/apikeys"); }
+
+// ============================================================================
+// Token 用量
+// ============================================================================
+function renderUsage() {
+  const s = document.getElementById("usage-summary");
+  API("/api/usage").then(u => {
+    s.innerHTML = `
+      <div class="k">总请求数</div><div>${u.total_requests.toLocaleString()}</div>
+      <div class="k">总 Token</div><div>${u.total_tokens.toLocaleString()}</div>
+      <div class="k">输入 Token</div><div>${u.prompt_tokens.toLocaleString()}</div>
+      <div class="k">输出 Token</div><div>${u.completion_tokens.toLocaleString()}</div>`;
+    document.getElementById("usage-models").innerHTML = u.by_model.length
+      ? u.by_model.map(m => `<tr><td class="mono">${escapeHtml(m.model || "—")}</td><td>${m.requests}</td><td>${m.total_tokens.toLocaleString()}</td></tr>`).join("")
+      : `<tr><td colspan="3" class="empty">暂无用量。</td></tr>`;
+  }).catch(() => {});
+
+  API("/api/usage/recent").then(rows => {
+    document.getElementById("usage-recent").innerHTML = rows.length
+      ? rows.map(r => `<tr>
+          <td class="muted">${fmtTime(r.created_at)}</td>
+          <td class="mono">${escapeHtml(r.model || "—")}</td>
+          <td>${r.prompt_tokens}</td><td>${r.completion_tokens}</td><td>${r.total_tokens}</td>
+          <td>${r.status === "ok" ? '<span class="badge ok">正常</span>' : '<span class="badge err">' + escapeHtml(r.status) + '</span>'}</td>
+          <td class="mono">${r.tool_group_id ? escapeHtml(r.tool_group_id.slice(0, 8)) + "…" : '<span class="muted">直连</span>'}</td>
+        </tr>`).join("")
+      : `<tr><td colspan="7" class="empty">暂无请求。</td></tr>`;
+  }).catch(() => {});
+}
+
+// ============================================================================
+// 工具组
+// ============================================================================
+function renderTGs() {
+  const tb = document.getElementById("tgs-body");
+  if (!TGS.length) { tb.innerHTML = `<tr><td colspan="5" class="empty">还没有工具组，创建一个，或用工具组 ID 加入。</td></tr>`; return; }
+  tb.innerHTML = TGS.map(t => `<tr>
+    <td>${escapeHtml(t.name)}</td>
+    <td class="mono">${escapeHtml(t.id)}
+      <button class="btn ghost sm" style="margin-left:6px" onclick="copyText('${escapeHtml(t.id)}')">复制</button></td>
+    <td>${t.is_owner ? '<span class="badge ok">所有者</span>' : '<span class="badge muted">成员</span>'}</td>
+    <td class="muted">${fmtTime(t.created_at)}</td>
+    <td class="actions"><a class="btn ghost sm" href="/toolgroup?id=${encodeURIComponent(t.id)}">打开</a></td>
+  </tr>`).join("");
+}
+
+async function createTG() {
+  const name = document.getElementById("tg-name").value.trim();
+  if (!name) { toast("请输入工具组名称", "err"); return; }
+  try {
+    const g = await API("/api/toolgroups", { method: "POST", body: JSON.stringify({ name }) });
+    _groupsCache = null;
+    toast("工具组已创建");
+    location.href = "/toolgroup?id=" + g.id;
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function joinTG() {
+  const id = document.getElementById("tg-join").value.trim();
+  if (!id) { toast("请输入工具组 ID", "err"); return; }
+  try {
+    await API("/api/toolgroups/" + encodeURIComponent(id) + "/join", { method: "POST" });
+    document.getElementById("tg-join").value = "";
+    _groupsCache = null;
+    toast("已加入工具组");
+    await init();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function loadToolGroups() { TGS = await API("/api/toolgroups"); }
+
+init();
+</script>
+</body>
+</html>

@@ -1,0 +1,10 @@
+# AgentGate does not use this YAML file.
+#
+# Admin credentials (hardcoded admin role): copy admin.json.example to
+# admin.json next to the project root and edit it, OR set the env vars
+# AGENTGATE_ADMIN_USER / AGENTGATE_ADMIN_PASS. If neither is provided, a random
+# one-time admin password is generated and stored in data/secret.json (and
+# printed to the console on first run).
+#
+# Runtime secrets (JWT signing key, fallback admin token) are auto-generated in
+# data/secret.json. Other knobs live in app/config.py.

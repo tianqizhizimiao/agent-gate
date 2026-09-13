@@ -1,0 +1,36 @@
+# ---- 机密：绝对不要提交 ----
+# admin.json 里是引导管理员的**明文密码**，复制 admin.json.example 自己填
+admin.json
+.env
+
+# ---- 运行期数据（数据库、密钥、工具组包与上传文件）----
+data/
+*.db
+*.db-wal
+*.db-shm
+*.db.bak-*
+
+# ---- Python ----
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+env/
+build/
+dist/
+*.egg-info/
+
+# ---- 编辑器 ----
+.idea/
+.vscode/
+
+# ---- pip 临时目录（安装失败会留下被锁的临时目录，可手动删）----
+.piptmp/
+.pipcache/
+.tmp/
+.tmp2/
+vendor/
+
+# ����ǰ�����ݱ��ݣ�����ʵ������Կ�������ύ��
+backup-before-reset-*/

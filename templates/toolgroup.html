@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentGate — 工具组</title>
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<div id="root"></div>
+<script src="/static/js/app.js"></script>
+<script>
+let ME = null, GROUPS = [], TG = null, ID = null, IS_OWNER = false, IS_ADMIN = false, CAN_MANAGE = false;
+
+async function init() {
+  if (!requireAuth()) return;
+  ME = await loadMe();
+  if (!ME) return;
+  ID = new URLSearchParams(location.search).get("id");
+  if (!ID) { location.href = "/dashboard"; return; }
+  GROUPS = await loadGroups();
+  try { TG = await API("/api/toolgroups/" + encodeURIComponent(ID)); }
+  catch (e) {
+    document.getElementById("root").innerHTML = shell(ME, GROUPS, {
+      activeGroup: ID, title: "工具组",
+      body: `<div class="card"><p class="muted" style="margin:0">加载失败：${escapeHtml(e.message)}</p>
+             <p style="margin:12px 0 0"><a href="/dashboard">← 返回仪表盘</a></p></div>`,
+    });
+    return;
+  }
+  IS_OWNER = TG.is_owner;
+  IS_ADMIN = !!(ME && ME.is_admin);
+  CAN_MANAGE = IS_OWNER || IS_ADMIN;      // 属主或系统管理员可管理该组
+  render();
+}
+
+function render() {
+  mount(ME, GROUPS, {
+    activeGroup: ID,
+    title: TG.name,
+    actions: `<a class="btn ghost sm" href="/dashboard">返回仪表盘</a>`,
+    body: `
+    <div class="page-head">
+      <h2>${escapeHtml(TG.name)}</h2>
+      <p>包目录即 Python 包，<code>__init__.py</code> 中定义注入提示词与工具。</p>
+    </div>
+
+    <div class="card">
+      <div class="kv">
+        <div class="k">工具组 ID</div>
+        <div class="mono">${escapeHtml(TG.id)}
+          <button class="btn ghost sm" style="margin-left:6px" onclick="copyText('${escapeHtml(TG.id)}')">复制</button>
+          <span class="muted" style="font-size:12px">— 分享该 ID 即可邀请成员</span></div>
+        <div class="k">我的角色</div>
+        <div>${IS_OWNER ? '<span class="badge ok">所有者</span>' : '<span class="badge muted">成员</span>'}</div>
+        <div class="k">所有者</div>
+        <div class="mono">${escapeHtml(TG.owner_id)}</div>
+      </div>
+    </div>
+
+    <!-- ============ 工具 ============ -->
+    <div class="section">
+      <div class="section-head"><h3>已注册工具</h3><span class="spacer"></span>
+        <span class="hint">来自 <code>__init__.py</code></span></div>
+      <div class="card" id="tools-card"><div id="tools-body"></div></div>
+    </div>
+
+    <!-- ============ __init__.py ============ -->
+    <div class="section">
+      <div class="section-head"><h3>包文件 <code>__init__.py</code></h3></div>
+      <div class="card">
+        <p class="muted" style="margin:0 0 10px;font-size:12.5px">
+          用 <code>prompt("...")</code> 设置注入的提示词，用 <code>@tool</code> 注册工具；
+          还可用 <code>database</code>（本组独立 KV 存储，list/dict 支持 <code>database["k"].append(x)</code> 这样的深度修改并自动写回）与 <code>name</code>（当前调用者用户名）。
+          上传到本目录的 <code>.py</code> 可用相对导入引用，例如 <code>from . import helpers</code>。
+        </p>
+        <textarea id="init-content" ${CAN_MANAGE ? "" : "readonly"} spellcheck="false"></textarea>
+        <div class="row" style="margin-top:10px">
+          ${CAN_MANAGE
+            ? `<button class="btn" onclick="saveInit()">保存</button>
+               <button class="btn ghost" onclick="reload()">保存并重载</button>`
+            : `<span class="muted">只读 — 仅所有者或管理员可编辑</span>`}
+        </div>
+        <div id="reload-out" style="margin-top:12px"></div>
+      </div>
+    </div>
+
+    <!-- ============ 文件 ============ -->
+    <div class="section">
+      <div class="section-head"><h3>文件</h3></div>
+      <div class="card flush">
+        ${CAN_MANAGE ? `<div class="row" style="padding:14px 16px;border-bottom:1px solid var(--border)">
+          <input type="file" id="file-input" style="padding:6px">
+          <button class="btn" onclick="uploadFile()">上传</button>
+        </div>` : ""}
+        <div class="scroll"><table>
+          <thead><tr><th>名称</th><th>大小</th><th></th></tr></thead>
+          <tbody id="files-body"></tbody>
+        </table></div>
+      </div>
+      <p class="muted" style="font-size:12px">该目录是一个 Python 包，上传的 <code>.py</code> 文件可在 <code>__init__.py</code> 中导入。</p>
+    </div>
+
+    <!-- ============ 日志 ============ -->
+    <div class="section">
+      <div class="section-head"><h3>工具调用日志</h3><span class="spacer"></span>
+        <span class="hint">仅保留近 1 小时</span>
+        <button class="btn ghost sm" onclick="loadLogs()">刷新</button></div>
+      <div class="card flush">
+        <div class="scroll"><table>
+          <thead><tr><th>时间</th><th>工具</th><th>状态</th><th>耗时</th><th>详情</th></tr></thead>
+          <tbody id="logs-body"></tbody>
+        </table></div>
+      </div>
+      <p class="muted" style="font-size:12px">仅记录工具调用（正常调用与异常），超过 1 小时的记录自动清除，不记录其它内容。</p>
+    </div>
+
+    <!-- ============ 成员 ============ -->
+    <div class="section">
+      <div class="section-head"><h3>成员</h3><span class="spacer"></span>
+        <button class="btn ghost sm" onclick="leaveGroup()">退出该组</button></div>
+      <div class="card flush">
+        <div class="scroll"><table>
+          <thead><tr><th>用户名</th><th>加入时间</th><th>角色</th><th></th></tr></thead>
+          <tbody id="members-body"></tbody>
+        </table></div>
+      </div>
+      <p class="muted" style="font-size:12px;margin:10px 0 0">
+        ${IS_OWNER ? "你是所有者：可移除成员。你退出时所有权会自动转给最早加入的成员。"
+                   : CAN_MANAGE ? "你是系统管理员：可管理该组并移除成员。"
+                   : "退出后会同时解绑你绑定到本组的 API 密钥。"}
+      </p>
+    </div>`,
+  });
+  loadInit(); loadTools(); loadFiles(); loadLogs(); loadMembers();
+}
+
+async function loadInit() {
+  try {
+    const r = await API("/api/toolgroups/" + ID + "/init");
+    document.getElementById("init-content").value = r.content || "";
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function saveInit() {
+  try {
+    await API("/api/toolgroups/" + ID + "/init", { method: "PUT", body: JSON.stringify({
+      content: document.getElementById("init-content").value }) });
+    toast("已保存 __init__.py");
+    return true;
+  } catch (e) { toast(e.message, "err"); return false; }
+}
+
+async function reload() {
+  if (!(await saveInit())) return;
+  try {
+    const r = await API("/api/toolgroups/" + ID + "/reload", { method: "POST" });
+    const out = document.getElementById("reload-out");
+    if (r.error) out.innerHTML = `<span class="badge err">加载失败</span> <pre style="margin-top:8px">${escapeHtml(r.error)}</pre>`;
+    else out.innerHTML = `<span class="badge ok">加载成功</span> <span class="muted">已注册 ${r.tools.length} 个工具，提示词：${r.prompt ? "已设置" : "未设置"}</span>`;
+    loadTools();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function loadTools() {
+  const el = document.getElementById("tools-body");
+  let tools = [];
+  try { tools = await API("/api/toolgroups/" + ID + "/tools"); }
+  catch (e) { el.innerHTML = `<p class="muted" style="margin:0">${escapeHtml(e.message)}</p>`; return; }
+  if (!tools.length) {
+    el.innerHTML = `<p class="muted" style="margin:0">暂未注册工具。编辑上方 <code>__init__.py</code> 后点击「保存并重载」。</p>`;
+    return;
+  }
+  el.innerHTML = `<div class="scroll scroll-b"><table>
+    <thead><tr><th>名称</th><th>描述</th><th>参数</th></tr></thead><tbody>
+    ${tools.map(t => `<tr>
+      <td><span class="tag">${escapeHtml(t.name)}</span></td>
+      <td>${escapeHtml(t.description)}</td>
+      <td><pre style="max-width:420px">${escapeHtml(JSON.stringify(t.parameters, null, 2))}</pre></td>
+    </tr>`).join("")}
+    </tbody></table></div>`;
+}
+
+async function loadFiles() {
+  const tb = document.getElementById("files-body");
+  let files = [];
+  try { files = await API("/api/toolgroups/" + ID + "/files"); } catch (e) { return; }
+  if (!files.length) { tb.innerHTML = `<tr><td colspan="3" class="empty">暂无文件。</td></tr>`; return; }
+  tb.innerHTML = files.map(f => `<tr>
+    <td class="mono">${escapeHtml(f.name)}${f.is_dir ? "/" : ""}</td>
+    <td class="muted">${f.is_dir ? "—" : fmtBytes(f.size)}</td>
+    <td class="actions">${CAN_MANAGE && !f.is_dir
+      ? `<button class="btn danger sm" onclick="delFile('${escapeHtml(f.name)}')">删除</button>` : ""}</td>
+  </tr>`).join("");
+}
+
+async function uploadFile() {
+  const input = document.getElementById("file-input");
+  if (!input.files.length) { toast("请先选择文件", "err"); return; }
+  const fd = new FormData();
+  fd.append("file", input.files[0]);
+  try {
+    const r = await fetch("/api/toolgroups/" + ID + "/files", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + localStorage.getItem("ag_token") },
+      body: fd,
+    });
+    if (!r.ok) { const j = await r.json(); throw new Error(j.detail || ("HTTP " + r.status)); }
+    input.value = "";
+    toast("上传成功");
+    loadFiles();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function delFile(name) {
+  if (!confirm("确定删除文件 " + name + "？")) return;
+  try {
+    await API("/api/toolgroups/" + ID + "/files/" + encodeURIComponent(name), { method: "DELETE" });
+    toast("已删除");
+    loadFiles();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function loadLogs() {
+  const tb = document.getElementById("logs-body");
+  let logs = [];
+  try { logs = await API("/api/toolgroups/" + ID + "/logs"); } catch (e) { return; }
+  if (!logs.length) { tb.innerHTML = `<tr><td colspan="5" class="empty">近 1 小时内没有工具调用。</td></tr>`; return; }
+  tb.innerHTML = logs.map(l => `<tr>
+    <td class="muted">${fmtTime(l.created_at)}</td>
+    <td><span class="tag">${escapeHtml(l.tool_name)}</span></td>
+    <td>${l.status === "normal" ? '<span class="badge ok">正常</span>' : '<span class="badge err">异常</span>'}</td>
+    <td class="muted">${l.duration_ms} ms</td>
+    <td class="muted" style="max-width:380px">${escapeHtml(l.detail)}</td>
+  </tr>`).join("");
+}
+
+async function loadMembers() {
+  const tb = document.getElementById("members-body");
+  let members = [];
+  try { members = await API("/api/toolgroups/" + ID + "/members"); } catch (e) { return; }
+  if (!members.length) { tb.innerHTML = `<tr><td colspan="4" class="empty">暂无成员。</td></tr>`; return; }
+  tb.innerHTML = members.map(m => {
+    const role = m.is_owner ? '<span class="badge ok">所有者</span>'
+               : m.user_id === ME.username ? '<span class="badge muted">我</span>'
+               : '<span class="badge muted">成员</span>';
+    const canRemove = CAN_MANAGE && !m.is_owner && m.user_id !== ME.username;
+    const action = canRemove
+      ? `<button class="btn danger sm" onclick="removeMember('${encodeURIComponent(m.user_id)}')">移除</button>`
+      : '';
+    return `<tr>
+      <td class="mono">${escapeHtml(m.user_id)}</td>
+      <td class="muted">${fmtTime(m.joined_at)}</td>
+      <td>${role}</td>
+      <td class="actions">${action}</td>
+    </tr>`;
+  }).join("");
+}
+
+async function removeMember(encodedName) {
+  const name = decodeURIComponent(encodedName);
+  if (!confirm(`把「${name}」移出该工具组？\n他的密钥会从本组解绑（密钥本身仍然可用）。`)) return;
+  try {
+    await API(`/api/toolgroups/${encodeURIComponent(ID)}/members/${encodedName}`,
+              { method: "DELETE" });
+    toast(`已移除「${name}」`);
+    await loadMembers();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function leaveGroup() {
+  const msg = IS_OWNER
+    ? `你是该组的所有者。\n\n退出后所有权会【自动转给最早加入的成员】；若没有其他成员，该组会被删除。\n你绑定到本组的 API 密钥会同时解绑。\n\n确定退出？`
+    : `退出该组？\n你绑定到本组的 API 密钥会同时解绑（密钥本身仍可用）。`;
+  if (!confirm(msg)) return;
+  try {
+    const r = await API(`/api/toolgroups/${encodeURIComponent(ID)}/leave`, { method: "POST" });
+    if (r && r.transferred_to) toast(`已退出，所有权已转给「${r.transferred_to}」`);
+    else if (r && r.deleted) toast("已退出，该组已删除");
+    else toast("已退出该组");
+    location.href = "/dashboard";
+  } catch (e) { toast(e.message, "err"); }
+}
+
+init();
+</script>
+</body>
+</html>

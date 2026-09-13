@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentGate — 管理</title>
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<div id="root"></div>
+<script src="/static/js/app.js"></script>
+<script>
+let ME = null, TOKS = [], USERS = [], GROUPS = [];
+
+async function init() {
+  if (!requireAuth()) return;
+  ME = await loadMe();
+  if (!ME) return;
+  GROUPS = await loadGroups();
+  await Promise.all([loadTokens(), loadUsers()]);
+  render();
+}
+
+function render() {
+  mount(ME, GROUPS, {
+    active: "admin",
+    title: "管理",
+    actions: `<a class="btn ghost sm" href="/dashboard">返回仪表盘</a>`,
+    body: `
+    <!-- ============ 注册令牌 ============ -->
+    <div class="section">
+      <div class="section-head"><h3>注册令牌</h3><span class="spacer"></span>
+        <span class="hint">共 ${TOKS.length} 个</span>
+        <button class="btn sm" onclick="newToken()">生成令牌</button></div>
+      <div class="card flush">
+        <div class="scroll scroll-b"><table>
+          <thead><tr><th>令牌</th><th>状态</th><th>使用者</th><th>创建时间</th><th></th></tr></thead>
+          <tbody id="tok-body"></tbody>
+        </table></div>
+      </div>
+      <p class="muted" style="font-size:12px;margin:10px 0 0">新用户在登录页的「注册」标签中粘贴该令牌即可创建账号，令牌仅能使用一次。</p>
+    </div>
+
+    <!-- ============ 账户 ============ -->
+    <div class="section">
+      <div class="section-head"><h3>账户</h3><span class="spacer"></span><span class="hint">共 ${USERS.length} 个</span></div>
+      <div class="card flush">
+        <div class="scroll"><table>
+          <thead><tr><th>用户名（ID）</th><th>角色</th><th>状态</th><th>创建时间</th><th></th></tr></thead>
+          <tbody id="usr-body"></tbody>
+        </table></div>
+      </div>
+      <p class="muted" style="font-size:12px">用户名是唯一 ID。<b>设为管理员</b>可让他管理全部账户、上游与工具组（管理员可以有多个；<code>admin.json</code> 指定的那个不可取消）。<br><b>注销账户</b>只是停用——登录与全部 API 密钥立即失效，数据保留、可随时恢复。他名下工具组的处置：组内还有其它管理员则保持原样，否则转给最早加入的成员，没有成员则删除该组。<br><b>彻底删除</b>则永久清除该账号，连同他名下的所有工具组（代码、日志、数据）、密钥、上游与用量记录，不可恢复。</p>
+    </div>`,
+  });
+  renderTokens();
+  renderUsers();
+}
+
+async function loadTokens() { TOKS = await API("/api/admin/registration-tokens"); }
+
+async function newToken() {
+  try {
+    const r = await API("/api/admin/registration-tokens", { method: "POST" });
+    prompt("新的注册令牌（在登录页「注册」标签中使用，仅能使用一次）：", r.token);
+    await loadTokens();
+    render();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function revokeToken(tok) {
+  if (!confirm("撤销这个尚未使用的注册令牌？")) return;
+  try {
+    await API("/api/admin/registration-tokens/" + encodeURIComponent(tok), { method: "DELETE" });
+    toast("令牌已撤销");
+    await loadTokens();
+    render();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+function renderTokens() {
+  const tb = document.getElementById("tok-body");
+  if (!tb) return;
+  if (!TOKS.length) { tb.innerHTML = `<tr><td colspan="5" class="empty">还没有注册令牌。</td></tr>`; return; }
+  tb.innerHTML = TOKS.map(t => `<tr>
+    <td class="mono">${escapeHtml(t.token)}</td>
+    <td>${t.used ? '<span class="badge muted">已使用</span>' : '<span class="badge ok">未使用</span>'}</td>
+    <td class="mono-sm">${escapeHtml(t.used_by || "") || '<span class="muted">—</span>'}</td>
+    <td class="muted">${fmtTime(t.created_at)}</td>
+    <td class="actions">${t.used ? "" :
+      `<button class="btn danger sm" onclick="revokeToken('${escapeHtml(t.token)}')">撤销</button>`}</td>
+  </tr>`).join("");
+}
+
+async function loadUsers() { USERS = await API("/api/admin/users"); }
+
+function renderUsers() {
+  const tb = document.getElementById("usr-body");
+  if (!USERS.length) { tb.innerHTML = `<tr><td colspan="5" class="empty">暂无账户。</td></tr>`; return; }
+  // 注意：这里只把「下标」插进 onclick，绝不把用户名拼进 JS 字符串
+  //（用户名是用户可控的，拼进去可被单引号逃逸）。
+  tb.innerHTML = USERS.map((u, i) => `<tr>
+    <td class="mono">${escapeHtml(u.id)}</td>
+    <td>${u.is_admin ? '<span class="badge ok">管理员</span>' : '<span class="badge muted">普通用户</span>'}</td>
+    <td>${u.active ? '<span class="badge ok">正常</span>' : '<span class="badge err">已注销</span>'}</td>
+    <td class="muted">${fmtTime(u.created_at)}</td>
+    <td class="actions">${u.id === ME.username ? '<span class="muted">当前账号</span>' : `
+      ${u.is_bootstrap ? ''
+        : u.is_admin ? `<button class="btn ghost sm" onclick="revokeAdminAt(${i})">取消管理员</button>`
+                     : `<button class="btn ghost sm" onclick="grantAdminAt(${i})">设为管理员</button>`}
+      ${u.active ? `<button class="btn danger sm" onclick="cancelAt(${i})">注销账户</button>`
+                 : `<button class="btn ghost sm" onclick="reactivateAt(${i})">恢复账户</button>`}
+      <button class="btn danger sm" onclick="hardDeleteAt(${i})">彻底删除</button>`}</td>
+  </tr>`).join("");
+}
+
+function _userAt(i) { return USERS[i] ? USERS[i].id : null; }
+
+async function cancel(name) {
+  if (!confirm(
+    `确定注销账户「${name}」？\n\n` +
+    `其登录与全部 API 密钥将立即失效，但账号数据保留，可随时恢复。\n\n` +
+    `他名下工具组的处置：\n` +
+    `  · 组内还有其它管理员 → 保持原样（由那位管理员接管）\n` +
+    `  · 没有管理员但有成员 → 转给最早加入的成员\n` +
+    `  · 没有成员 → 删除该组`
+  )) return;
+  try {
+    const r = await API("/api/admin/users/" + encodeURIComponent(name) + "/cancel", { method: "POST" });
+    const g = (r && r.groups) || {};
+    const nu = (g.untouched || []).length;
+    const nt = Object.keys(g.transferred || {}).length;
+    const nd = (g.deleted || []).length;
+    const parts = [];
+    if (nu) parts.push(`${nu} 个组保持原样（有管理员）`);
+    if (nt) parts.push(`${nt} 个组已转交`);
+    if (nd) parts.push(`${nd} 个空组已删除`);
+    toast("账户已注销" + (parts.length ? "；" + parts.join("，") : ""));
+    await loadUsers(); renderUsers();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function reactivate(name) {
+  try {
+    await API("/api/admin/users/" + encodeURIComponent(name) + "/reactivate", { method: "POST" });
+    toast("账户已恢复");
+    await loadUsers(); renderUsers();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+function cancelAt(i) { const n = _userAt(i); if (n) cancel(n); }
+function reactivateAt(i) { const n = _userAt(i); if (n) reactivate(n); }
+
+async function grantAdminAt(i) {
+  const n = _userAt(i); if (!n) return;
+  if (!confirm(`把「${n}」设为管理员？\n他将能管理所有账户、上游与全部工具组。`)) return;
+  try {
+    await API("/api/admin/users/" + encodeURIComponent(n) + "/grant-admin", { method: "POST" });
+    toast(`「${n}」已是管理员`);
+    await loadUsers(); renderUsers();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function revokeAdminAt(i) {
+  const n = _userAt(i); if (!n) return;
+  if (!confirm(`取消「${n}」的管理员身份？`)) return;
+  try {
+    await API("/api/admin/users/" + encodeURIComponent(n) + "/revoke-admin", { method: "POST" });
+    toast(`「${n}」已降为普通用户`);
+    await loadUsers(); renderUsers();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function hardDelete(name) {
+  if (!confirm(
+    `彻底删除账号「${name}」？\n\n` +
+    `将一并永久删除：\n` +
+    `  · 他名下的所有工具组（代码、日志、数据）\n` +
+    `  · 他的全部 API 密钥与上游 API\n` +
+    `  · 他的全部用量记录\n\n` +
+    `此操作【不可恢复】。若只是想停用，请用「注销账户」。`
+  )) return;
+  const typed = prompt(`请输入用户名「${name}」以确认彻底删除：`);
+  if (typed === null) return;
+  if (typed.trim() !== name) { toast("用户名不匹配，已取消", "err"); return; }
+  try {
+    const r = await API("/api/admin/users/" + encodeURIComponent(name), { method: "DELETE" });
+    const d = (r && r.deleted) || {};
+    toast(`已彻底删除「${name}」：工具组 ${d.tool_groups || 0} 个、密钥 ${d.api_keys || 0} 个、`
+        + `上游 ${d.upstreams || 0} 个、用量 ${d.usage_rows || 0} 条`);
+    await loadUsers(); renderUsers();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+function hardDeleteAt(i) { const n = _userAt(i); if (n) hardDelete(n); }
+
+init();
+</script>
+</body>
+</html>

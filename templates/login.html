@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentGate — 登录</title>
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<div class="auth-wrap">
+  <div class="auth-card">
+    <div class="auth-brand"><span class="logo">A</span><h1>AgentGate</h1></div>
+    <p class="auth-sub">多用户 LLM 网关 · 工具组注入与拦截</p>
+
+    <div class="tabs">
+      <button id="tab-login" class="active" onclick="switchTab('login')">登录</button>
+      <button id="tab-register" onclick="switchTab('register')">注册</button>
+    </div>
+
+    <div id="pane-login">
+      <div class="form-stack">
+        <div class="field"><label>用户名</label>
+          <input id="li-user" class="code" autocomplete="username" placeholder="你的用户名"></div>
+        <div class="field"><label>密码</label>
+          <input id="li-pass" type="password" autocomplete="current-password" placeholder="你的密码"></div>
+        <button class="btn" id="btn-login" style="width:100%;justify-content:center" onclick="doLogin()">登 录</button>
+      </div>
+    </div>
+
+    <div id="pane-register" style="display:none">
+      <div class="form-stack">
+        <div class="field"><label>用户名（将作为你的唯一 ID）</label>
+          <input id="rg-user" class="code" placeholder="2–32 个字符"></div>
+        <div class="field"><label>密码（至少 6 位）</label>
+          <input id="rg-pass" type="password" placeholder="至少 6 位"></div>
+        <div class="field"><label>一次性注册令牌</label>
+          <input id="rg-token" class="code" placeholder="向管理员索取 reg-..."></div>
+        <button class="btn" id="btn-register" style="width:100%;justify-content:center" onclick="doRegister()">创建账号</button>
+      </div>
+      <p class="muted" style="font-size:12px;margin:14px 0 0">账号只能通过管理员生成的一次性令牌注册，令牌用后即失效。</p>
+    </div>
+
+    <p class="form-err" id="err"></p>
+  </div>
+</div>
+<script src="/static/js/app.js"></script>
+<script src="/static/js/crypto.js"></script>
+<script>
+// 挑战流程失败时是否允许退化为旧式登录（默认不允许，需用户显式确认）
+let allowPlain = false;
+
+if (localStorage.getItem("ag_token")) {
+  API("/api/auth/me").then(() => { location.href = "/dashboard"; })
+                     .catch(() => localStorage.removeItem("ag_token"));
+}
+
+function switchTab(t) {
+  document.getElementById("tab-login").classList.toggle("active", t === "login");
+  document.getElementById("tab-register").classList.toggle("active", t === "register");
+  document.getElementById("pane-login").style.display = t === "login" ? "" : "none";
+  document.getElementById("pane-register").style.display = t === "register" ? "" : "none";
+  document.getElementById("err").textContent = "";
+}
+
+function showErr(msg) {
+  const el = document.getElementById("err");
+  el.innerHTML = "";
+  el.appendChild(document.createTextNode(msg));
+}
+
+function showErrWithFallback(text, retry) {
+  const el = document.getElementById("err");
+  el.innerHTML = "";
+  el.appendChild(document.createTextNode(text + " "));
+  const a = document.createElement("a");
+  a.href = "#";
+  a.textContent = "改用旧式登录（不推荐）";
+  a.style.color = "var(--danger)";
+  a.onclick = (ev) => { ev.preventDefault(); allowPlain = true; retry(); };
+  el.appendChild(a);
+}
+
+// 取一次性挑战 → 浏览器内派生 verifier → 算 proof
+async function hashedCredentials(username, password, purpose) {
+  const ch = await API("/api/auth/challenge", {
+    method: "POST",
+    body: JSON.stringify({ username: username, purpose: purpose }),
+  });
+  const verifier = await agPbkdf2(password, ch.salt, ch.iterations);
+  const proof = await agProof(ch.nonce, verifier);
+  return { nonce: ch.nonce, proof: proof, verifier: verifier };
+}
+
+async function doLogin() {
+  const btn = document.getElementById("btn-login");
+  const username = document.getElementById("li-user").value.trim();
+  const password = document.getElementById("li-pass").value;
+  btn.disabled = true;
+
+  let payload = { username: username };
+  if (allowPlain) {
+    payload.password = password;
+  } else {
+    btn.textContent = "计算中…";
+    try {
+      const c = await hashedCredentials(username, password, "login");
+      payload.nonce = c.nonce;
+      payload.proof = c.proof;
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = "登 录";
+      showErrWithFallback("无法获取登录挑战：" + e.message, doLogin);
+      return;
+    }
+    btn.textContent = "登 录";
+  }
+
+  try {
+    const r = await API("/api/auth/login", { method: "POST", body: JSON.stringify(payload) });
+    localStorage.setItem("ag_token", r.token);
+    location.href = r.is_admin ? "/admin" : "/dashboard";
+  } catch (e) {
+    showErr(e.message);
+    btn.disabled = false;
+  }
+}
+
+async function doRegister() {
+  const btn = document.getElementById("btn-register");
+  const username = document.getElementById("rg-user").value.trim();
+  const password = document.getElementById("rg-pass").value;
+  const regToken = document.getElementById("rg-token").value.trim();
+  btn.disabled = true;
+
+  let payload = { username: username, registration_token: regToken };
+  if (allowPlain) {
+    payload.password = password;
+  } else {
+    btn.textContent = "计算中…";
+    try {
+      const c = await hashedCredentials(username, password, "register");
+      payload.nonce = c.nonce;
+      payload.verifier = c.verifier;
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = "创建账号";
+      showErrWithFallback("无法获取注册挑战：" + e.message, doRegister);
+      return;
+    }
+    btn.textContent = "创建账号";
+  }
+
+  try {
+    const r = await API("/api/auth/register", { method: "POST", body: JSON.stringify(payload) });
+    localStorage.setItem("ag_token", r.token);
+    location.href = "/dashboard";
+  } catch (e) {
+    showErr(e.message);
+    btn.disabled = false;
+  }
+}
+</script>
+</body>
+</html>
