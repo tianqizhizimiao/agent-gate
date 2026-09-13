@@ -80,12 +80,14 @@ python run.py
 2. 环境变量 `AGENTGATE_ADMIN_USER` / `AGENTGATE_ADMIN_PASS`
 3. `data/secret.json` 里的随机一次性令牌（首次运行会打印到控制台）
 
-仓库里**不包含** `admin.json`（已在 `.gitignore` 中，避免把口令提交上去）。
-首次使用请复制模板再改：
+仓库里**包含**一份可直接用的 `admin.json`（`admin` / `admin`），克隆下来就能登录。
+对外暴露前**务必改掉**它 —— 改完重启即可生效，不需要重建数据库。
 
 ```bash
-cp admin.json.example admin.json     # 然后把 username / password 改成你自己的
+# 想自己指定，也可以从模板复制一份再改
+cp admin.json.example admin.json
 ```
+
 以管理员登录 → **管理员** → 生成注册令牌 → 交给新用户。
 
 ## 使用网关
