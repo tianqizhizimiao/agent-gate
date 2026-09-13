@@ -55,6 +55,23 @@ pip install -r requirements.txt   # fastapi, uvicorn, httpx, jinja2, python-mult
 python run.py                     # 或： python main.py   -> http://127.0.0.1:8000
 ```
 
+### 改端口 / 监听地址
+
+不用改代码，三种方式（优先级从高到低）：
+
+```bash
+python run.py 9000                # 1) 命令行参数
+set AGENTGATE_PORT=9000           # 2) 环境变量（PowerShell: $env:AGENTGATE_PORT=9000）
+                                  # 3) 直接改 app/config.py 里的 PORT 默认值
+```
+
+默认监听 `0.0.0.0`（局域网可访问）。只想给本机用：
+
+```bash
+set AGENTGATE_HOST=127.0.0.1
+python run.py
+```
+
 ### 管理员登录
 
 管理员角色是硬编码的，始终存在。凭据按以下顺序读取：
@@ -63,7 +80,12 @@ python run.py                     # 或： python main.py   -> http://127.0.0.1:
 2. 环境变量 `AGENTGATE_ADMIN_USER` / `AGENTGATE_ADMIN_PASS`
 3. `data/secret.json` 里的随机一次性令牌（首次运行会打印到控制台）
 
-仓库里跟踪着一份默认的 `admin.json`（`admin` / `admin`）—— 对外暴露前**务必改掉**。
+仓库里**不包含** `admin.json`（已在 `.gitignore` 中，避免把口令提交上去）。
+首次使用请复制模板再改：
+
+```bash
+cp admin.json.example admin.json     # 然后把 username / password 改成你自己的
+```
 以管理员登录 → **管理员** → 生成注册令牌 → 交给新用户。
 
 ## 使用网关

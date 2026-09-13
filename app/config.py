@@ -17,6 +17,12 @@ TOOLGROUPS_DIR = DATA_DIR / "toolgroups"
 TEMPLATES_DIR = BASE_DIR / "templates"
 STATIC_DIR = BASE_DIR / "static"
 
+# 监听地址与端口。优先级：命令行参数 > 环境变量 > 这里的默认值。
+#   python run.py 9000
+#   set AGENTGATE_PORT=9000 && python run.py
+HOST = os.getenv("AGENTGATE_HOST", "0.0.0.0")
+PORT = int(os.getenv("AGENTGATE_PORT", "8000"))
+
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 TOOLGROUPS_DIR.mkdir(parents=True, exist_ok=True)
 

@@ -1,5 +1,5 @@
-"""AgentGate entrypoint: `python main.py` (same as `python run.py`)."""
-import uvicorn
+"""AgentGate 入口：``python main.py [端口]`` —— 与 ``python run.py`` 完全等价。"""
+from run import main
 
 if __name__ == "__main__":
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=False)
+    main()
