@@ -91,17 +91,26 @@ function render() {
       <div class="section-head"><h3>文件</h3></div>
       <div class="card flush">
         ${CAN_MANAGE ? `<div style="padding:14px 16px;border-bottom:1px solid var(--border)">
-          <div class="row" style="flex-wrap:wrap;gap:8px;align-items:center">
-            <input type="file" id="file-input" multiple style="padding:6px">
-            <button class="btn" onclick="uploadPicked('files')">上传文件</button>
-            <span class="muted">或</span>
-            <button class="btn ghost" onclick="document.getElementById('dir-input').click()">上传整个文件夹</button>
-            <input type="file" id="dir-input" webkitdirectory directory multiple style="display:none">
+          <div class="upload-zone" id="upload-zone" title="点击选择文件">
+            <div class="uz-main">点击选择文件<span class="muted">（可多选）</span></div>
+            <div class="uz-sub">整个文件夹请用下方按钮</div>
           </div>
-          <div class="muted" id="upload-limit" style="font-size:12px;margin-top:8px"></div>
+          <div class="row" style="gap:8px;margin-top:10px;align-items:center">
+            <button class="btn ghost sm" onclick="pickDir()">上传整个文件夹</button>
+            <span class="muted" id="upload-limit" style="font-size:12px"></span>
+          </div>
+          <input type="file" id="file-input" multiple style="display:none">
+          <input type="file" id="dir-input" webkitdirectory directory multiple style="display:none">
+        </div>` : ""}
+        ${CAN_MANAGE ? `<div class="files-bar">
+          <label><input type="checkbox" id="files-all" onchange="toggleAllFiles(this.checked)"> 全选</label>
+          <span class="spacer"></span>
+          <span class="muted" id="files-selinfo" style="font-size:12px"></span>
+          <button class="btn danger sm" id="files-del-sel" onclick="deleteSelectedFiles()" disabled>删除选中</button>
+          <button class="btn ghost sm" id="files-clear" onclick="clearAllFiles()">清空全部</button>
         </div>` : ""}
         <div class="scroll"><table>
-          <thead><tr><th>名称</th><th>大小</th><th></th></tr></thead>
+          <thead><tr>${CAN_MANAGE ? `<th style="width:34px"></th>` : ""}<th>名称</th><th>大小</th><th></th></tr></thead>
           <tbody id="files-body"></tbody>
         </table></div>
       </div>
@@ -139,7 +148,7 @@ function render() {
       </p>
     </div>`,
   });
-  loadInit(); loadTools(); loadFiles(); loadLogs(); loadMembers(); loadLimits();
+  loadInit(); loadTools(); loadFiles(); loadLogs(); loadMembers(); loadLimits(); initUploadZone();
 }
 
 async function loadInit() {
@@ -193,13 +202,72 @@ async function loadFiles() {
   let files = [];
   try { files = await API("/api/toolgroups/" + ID + "/files"); } catch (e) { return; }
   FILES = files;
-  if (!files.length) { tb.innerHTML = `<tr><td colspan="3" class="empty">暂无文件。</td></tr>`; return; }
+  const cols = CAN_MANAGE ? 4 : 3;
+  if (!files.length) { tb.innerHTML = `<tr><td colspan="${cols}" class="empty">暂无文件。</td></tr>`; resetFilesBar(); return; }
   tb.innerHTML = files.map((f, i) => `<tr>
+    ${CAN_MANAGE ? `<td><input type="checkbox" class="file-check" data-i="${i}" onchange="onFileCheck()"></td>` : ""}
     <td class="mono">${escapeHtml(f.name)}</td>
-    <td class="muted">${f.is_dir ? "—" : fmtBytes(f.size)}</td>
-    <td class="actions">${CAN_MANAGE && !f.is_dir
+    <td class="muted">${fmtBytes(f.size)}</td>
+    <td class="actions">${CAN_MANAGE
       ? `<button class="btn danger sm" onclick="delFileAt(${i})">删除</button>` : ""}</td>
   </tr>`).join("");
+  resetFilesBar();
+}
+
+// ---- 文件列表的批量操作 --------------------------------------------------
+function checkedIndexes() {
+  return Array.from(document.querySelectorAll(".file-check:checked")).map(cb => Number(cb.dataset.i));
+}
+
+function resetFilesBar() {
+  const all = document.getElementById("files-all");
+  if (all) { all.checked = false; all.indeterminate = false; }
+  const info = document.getElementById("files-selinfo");
+  if (info) info.textContent = "";
+  const del = document.getElementById("files-del-sel");
+  if (del) del.disabled = true;
+  const clear = document.getElementById("files-clear");
+  if (clear) clear.disabled = !FILES.length;
+}
+
+function onFileCheck() {
+  const n = checkedIndexes().length;
+  const all = document.getElementById("files-all");
+  if (all) {
+    all.checked = n > 0 && n === FILES.length;
+    all.indeterminate = n > 0 && n < FILES.length;
+  }
+  const info = document.getElementById("files-selinfo");
+  if (info) info.textContent = n ? `已选 ${n} 个` : "";
+  const del = document.getElementById("files-del-sel");
+  if (del) del.disabled = n === 0;
+}
+
+function toggleAllFiles(on) {
+  document.querySelectorAll(".file-check").forEach(cb => { cb.checked = on; });
+  onFileCheck();
+}
+
+async function deleteSelectedFiles() {
+  const names = checkedIndexes().map(i => FILES[i] && FILES[i].name).filter(Boolean);
+  if (!names.length) return;
+  if (!confirm(`确定删除选中的 ${names.length} 个文件？\n\n${names.slice(0, 12).join("\n")}${names.length > 12 ? `\n… 还有 ${names.length - 12} 个` : ""}`)) return;
+  try {
+    const r = await API("/api/toolgroups/" + ID + "/files/delete",
+      { method: "POST", body: JSON.stringify({ names }) });
+    toast(`已删除 ${r.count} 个文件`);
+    loadFiles();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function clearAllFiles() {
+  if (!FILES.length) { toast("没有可清空的文件", "err"); return; }
+  if (!confirm(`确定清空全部 ${FILES.length} 个文件？\n\n__init__.py 会保留（否则这个包无法加载）。`)) return;
+  try {
+    const r = await API("/api/toolgroups/" + ID + "/files/clear", { method: "POST" });
+    toast(`已清空 ${r.count} 个文件`);
+    loadFiles();
+  } catch (e) { toast(e.message, "err"); }
 }
 
 // ---------------------------------------------------------------- 上传
@@ -253,6 +321,23 @@ function checkUpload(items) {
   if (total > LIMITS.max_total_bytes)
     return `合计 ${fmtBytes(total)} 超限：单次最多 ${fmtBytes(LIMITS.max_total_bytes)}`;
   return null;
+}
+
+// 上传区的接线：点整个框 = 选文件（原生 input 藏起来了，它太丑）
+function pickDir() {
+  const el = document.getElementById("dir-input");
+  if (el) el.click();
+}
+
+function initUploadZone() {
+  const zone = document.getElementById("upload-zone");
+  const input = document.getElementById("file-input");
+  const dirInput = document.getElementById("dir-input");
+  if (!zone || !input) return;
+
+  zone.addEventListener("click", () => input.click());
+  input.addEventListener("change", () => { if (input.files.length) uploadPicked("files"); });
+  if (dirInput) dirInput.addEventListener("change", () => { if (dirInput.files.length) uploadPicked("dir"); });
 }
 
 async function uploadPicked(which) {

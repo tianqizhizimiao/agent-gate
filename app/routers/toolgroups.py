@@ -435,6 +435,72 @@ def delete_file(gid: str, name: str, user: dict = Depends(get_current_user)):
     return {"ok": True}
 
 
+def _list_rel_files(pkg_dir) -> list[str]:
+    """包内所有文件的相对路径（跳过 .agentgate / __pycache__）。"""
+    if not pkg_dir.exists():
+        return []
+    out = []
+    for p in sorted(pkg_dir.rglob("*")):
+        rel = p.relative_to(pkg_dir)
+        if any(part in (".agentgate", "__pycache__") for part in rel.parts):
+            continue
+        if p.is_file():
+            out.append(rel.as_posix())
+    return out
+
+
+def _purge_files(pkg_dir, rels: list[str]) -> list[str]:
+    """删除给定文件，然后清掉因此变空的目录。
+
+    ``__init__.py`` 永远跳过 —— 它是包能加载的前提；删掉它整个工具组就废了。
+    """
+    removed: list[str] = []
+    for raw in rels:
+        rel = _safe_relpath(raw)
+        if rel is None or rel == "__init__.py":
+            continue
+        target = pkg_dir / rel
+        if target.exists() and target.is_file():
+            target.unlink()
+            removed.append(rel)
+
+    # 从深到浅清理空目录
+    dirs = [p for p in pkg_dir.rglob("*")
+            if p.is_dir()
+            and not any(part in (".agentgate", "__pycache__") for part in p.relative_to(pkg_dir).parts)]
+    for d in sorted(dirs, key=lambda p: len(p.parts), reverse=True):
+        try:
+            if not any(d.iterdir()):
+                d.rmdir()
+        except OSError:
+            pass
+    return removed
+
+
+@router.post("/api/toolgroups/{gid}/files/delete")
+def delete_files(gid: str, req: models.FilesDelete, user: dict = Depends(get_current_user)):
+    """批量删除。走 POST + JSON body，省得把一堆路径拼进 URL 里编码。"""
+    row, is_owner, _member, is_admin = _get_group_or_404(gid, user)
+    _need_write(is_owner, is_admin, "delete files")
+    if not req.names:
+        raise HTTPException(400, "没有指定要删除的文件")
+    pkg_dir = config.TOOLGROUPS_DIR / row["folder_name"]
+    removed = _purge_files(pkg_dir, req.names)
+    manager.invalidate(gid)
+    return {"ok": True, "count": len(removed), "removed": removed}
+
+
+@router.post("/api/toolgroups/{gid}/files/clear")
+def clear_files(gid: str, user: dict = Depends(get_current_user)):
+    """清空包内所有文件（保留 ``__init__.py``，否则包无法加载）。"""
+    row, is_owner, _member, is_admin = _get_group_or_404(gid, user)
+    _need_write(is_owner, is_admin, "clear files")
+    pkg_dir = config.TOOLGROUPS_DIR / row["folder_name"]
+    removed = _purge_files(pkg_dir, _list_rel_files(pkg_dir))
+    manager.invalidate(gid)
+    return {"ok": True, "count": len(removed), "removed": removed}
+
+
 # -- logs / members ---------------------------------------------------
 @router.get("/api/toolgroups/{gid}/logs")
 async def logs_toolgroup(gid: str, user: dict = Depends(get_current_user)):

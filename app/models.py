@@ -143,6 +143,11 @@ class TransferRequest(BaseModel):
     user_id: str
 
 
+class FilesDelete(BaseModel):
+    """批量删除工具组包内文件。``names`` 是相对包根目录的路径。"""
+    names: list[str] = Field(default_factory=list, max_length=500)
+
+
 class ToolOut(BaseModel):
     name: str
     description: str
