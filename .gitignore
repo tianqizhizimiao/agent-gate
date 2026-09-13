@@ -1,5 +1,5 @@
 # ---- 机密：绝对不要提交 ----
-# admin.json 里是引导管理员的**明文密码**，复制 admin.json.example 自己填
+# admin.json 里是引导管理员的明文密码，复制 admin.json.example 自己填
 admin.json
 .env
 
@@ -9,6 +9,12 @@ data/
 *.db-wal
 *.db-shm
 *.db.bak-*
+
+# ---- 重置前的数据备份（含真实上游密钥，切勿提交）----
+backup-before-reset-*/
+
+# ---- 本地助手脚本 ----
+push-to-github.ps1
 
 # ---- Python ----
 __pycache__/
@@ -31,6 +37,3 @@ dist/
 .tmp/
 .tmp2/
 vendor/
-
-# ����ǰ�����ݱ��ݣ�����ʵ������Կ�������ύ��
-backup-before-reset-*/
